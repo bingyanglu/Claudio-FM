@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const path = require('path');
 const { spawn } = require('child_process');
 const {
   boolEnv,
@@ -11,6 +12,8 @@ const {
 const DEFAULT_NETEASE_COMMAND = 'npx';
 const DEFAULT_NETEASE_ARGS = ['NeteaseCloudMusicApi@latest'];
 const DEFAULT_NETEASE_READY_TIMEOUT_MS = 60000;
+const DEFAULT_KOKORO_BASE = 'http://127.0.0.1:8880';
+const DEFAULT_KOKORO_READY_TIMEOUT_MS = 120000;
 
 const children = new Set();
 let shuttingDown = false;
@@ -28,6 +31,24 @@ function neteasePort(baseUrl) {
   } catch {
     return '3000';
   }
+}
+
+function kokoroPort(baseUrl) {
+  try {
+    const url = new URL(baseUrl);
+    if (url.port) return url.port;
+    return url.protocol === 'https:' ? '443' : '80';
+  } catch {
+    return '8880';
+  }
+}
+
+function kokoroBaseUrl() {
+  return (process.env.KOKORO_API_BASE || DEFAULT_KOKORO_BASE).replace(/\/+$/, '');
+}
+
+function providerIsKokoro(value) {
+  return String(value || '').trim().toLowerCase() === 'kokoro';
 }
 
 function cleanNpmEnv(env) {
@@ -138,7 +159,7 @@ function spawnChild(name, command, args, options = {}) {
     flushRedactedOutput(process.stderr, 'stderrBuffer');
     child.lastExit = { code, signal };
     children.delete(child);
-    if (!shuttingDown && name === 'netease') {
+    if (!shuttingDown && (name === 'netease' || name === 'kokoro')) {
       const detail = signal ? `signal ${signal}` : `code ${code}`;
       console.warn(`[${name}] exited before Claudio shutdown (${detail})`);
     }
@@ -213,6 +234,81 @@ async function startNeteaseIfNeeded() {
   return { connected: false, baseUrl, required };
 }
 
+async function getKokoroStatus(baseUrl, timeoutMs = 1000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const healthUrl = new URL('/health', `${baseUrl}/`);
+    const res = await fetch(healthUrl, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json().catch(() => ({}));
+    return {
+      connected: true,
+      model: body?.model || '',
+      voice: body?.voice || '',
+    };
+  } catch {
+    return { connected: false, model: '', voice: '' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForKokoro(baseUrl, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const status = await getKokoroStatus(baseUrl);
+    if (status.connected) return status;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  return { connected: false, model: '', voice: '' };
+}
+
+async function startKokoroIfNeeded() {
+  const requiredByConfig = providerIsKokoro(process.env.TTS_PROVIDER) ||
+    providerIsKokoro(process.env.CALLER_TTS_PROVIDER);
+  if (!requiredByConfig) return { connected: false, required: false };
+
+  const autoStart = boolEnv('KOKORO_AUTO_START', true);
+  const required = boolEnv('KOKORO_REQUIRED', true);
+  const baseUrl = kokoroBaseUrl();
+  const existingStatus = await getKokoroStatus(baseUrl);
+  if (existingStatus.connected) {
+    console.log(`[start] Kokoro TTS 已在运行: ${baseUrl}`);
+    return { connected: true, baseUrl, required };
+  }
+
+  if (!autoStart) {
+    const message = `[start] Kokoro TTS is configured but not reachable: ${baseUrl}`;
+    if (required) throw new Error(message);
+    console.warn(`${message}. Continuing without local voice synthesis.`);
+    return { connected: false, baseUrl, required };
+  }
+
+  const timeoutMs = Number(process.env.KOKORO_READY_TIMEOUT_MS || DEFAULT_KOKORO_READY_TIMEOUT_MS);
+  const kokoroEnv = {
+    ...process.env,
+    KOKORO_PORT: process.env.KOKORO_PORT || kokoroPort(baseUrl),
+  };
+  const scriptPath = path.join(__dirname, 'kokoro-api.js');
+  console.log(`[start] Starting Kokoro TTS sidecar: ${process.execPath} ${scriptPath} (PORT=${kokoroEnv.KOKORO_PORT})`);
+  const sidecar = spawnChild('kokoro', process.execPath, [scriptPath], { env: kokoroEnv });
+
+  const startedStatus = await waitForKokoro(baseUrl, timeoutMs);
+  if (startedStatus.connected) {
+    console.log(`[start] Kokoro TTS 已启动: ${baseUrl}`);
+    return { connected: true, baseUrl, required };
+  }
+
+  const sidecarState = sidecar.lastExit
+    ? `exited ${sidecar.lastExit.signal || sidecar.lastExit.code}`
+    : `still running as pid ${sidecar.pid}`;
+  const message = `[start] Kokoro TTS did not become ready within ${timeoutMs}ms (${sidecarState}).`;
+  if (required) throw new Error(message);
+  console.warn(`${message} Continuing without local voice synthesis.`);
+  return { connected: false, baseUrl, required };
+}
+
 async function prepareNeteaseLogin(neteaseState) {
   if (!neteaseState?.connected) {
     console.log('[netease-login] Netease sidecar is unavailable; login bootstrap skipped.');
@@ -231,6 +327,7 @@ async function main() {
 
   const neteaseState = await startNeteaseIfNeeded();
   await prepareNeteaseLogin(neteaseState);
+  await startKokoroIfNeeded();
   spawnChild('claudio', process.execPath, ['server.js'], {
     env: process.env,
   });
