@@ -1,4 +1,5 @@
 const netease = require('./music-netease');
+const spotify = require('./music-spotify');
 const ytDlp = require('./music-yt-dlp');
 
 async function getStreamUrl(query) {
@@ -10,7 +11,18 @@ async function getTrack(query) {
   const provider = process.env.MUSIC_PROVIDER || 'auto';
   console.log(`[音乐] 搜索: "${query}" (来源: ${provider})`);
 
-  if (provider !== 'yt-dlp') {
+  if (provider === 'spotify' || (provider === 'auto' && process.env.SPOTIFY_CLIENT_ID && process.env.SPOTIFY_CLIENT_SECRET)) {
+    const spotifyTrack = await spotify.getTrack(query);
+    if (spotifyTrack) {
+      console.log(`[音乐] Spotify 找到: ${spotifyTrack.title || query}${spotifyTrack.artist ? ' — ' + spotifyTrack.artist : ''}`);
+      return spotifyTrack;
+    }
+    if (provider === 'spotify') {
+      console.log(`[音乐] Spotify 未找到可播版本，尝试 yt-dlp…`);
+    }
+  }
+
+  if (provider === 'netease' || process.env.MUSIC_ENABLE_NETEASE === '1') {
     const neteaseTrack = await netease.getTrack(query);
     if (neteaseTrack) {
       console.log(`[音乐] 网易云找到: ${neteaseTrack.title || query}`);

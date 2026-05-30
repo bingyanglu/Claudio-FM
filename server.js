@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const { route } = require('./router');
@@ -44,6 +45,16 @@ const REFILL_TRACK_COUNT = 3;
 const PROGRAM_START_ID_TEXT = 'This is Claudio.';
 const TRACK_REPEAT_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ARTIST_RECENT_WINDOW = 5;
+const SPOTIFY_SCOPES = [
+  'streaming',
+  'user-read-email',
+  'user-read-private',
+  'user-modify-playback-state',
+  'user-read-playback-state',
+].join(' ');
+const SPOTIFY_TOKEN_PATH = path.join(__dirname, 'data', 'spotify', 'token.json');
+const SPOTIFY_STATE_PATH = path.join(__dirname, 'data', 'spotify', 'state.json');
+const SPOTIFY_STATE_TTL_MS = 10 * 60 * 1000;
 
 const stationState = {
   programId: null,
@@ -56,6 +67,104 @@ const stationState = {
 
 function normalizeDjLanguage(value) {
   return value === 'zh' ? 'zh' : 'en';
+}
+
+function ensureDirForFile(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+function spotifyRedirectUri(req) {
+  return process.env.SPOTIFY_REDIRECT_URI || `${req.protocol}://${req.get('host')}/auth/spotify/callback`;
+}
+
+function spotifyCredentials() {
+  return {
+    clientId: process.env.SPOTIFY_CLIENT_ID || '',
+    clientSecret: process.env.SPOTIFY_CLIENT_SECRET || '',
+  };
+}
+
+function readSpotifyToken() {
+  try {
+    return JSON.parse(fs.readFileSync(SPOTIFY_TOKEN_PATH, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeSpotifyToken(token) {
+  ensureDirForFile(SPOTIFY_TOKEN_PATH);
+  fs.writeFileSync(SPOTIFY_TOKEN_PATH, `${JSON.stringify(token, null, 2)}\n`, { mode: 0o600 });
+}
+
+function readSpotifyState() {
+  try {
+    return JSON.parse(fs.readFileSync(SPOTIFY_STATE_PATH, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeSpotifyState(state) {
+  ensureDirForFile(SPOTIFY_STATE_PATH);
+  fs.writeFileSync(SPOTIFY_STATE_PATH, `${JSON.stringify({
+    state,
+    expires_at: Date.now() + SPOTIFY_STATE_TTL_MS,
+  }, null, 2)}\n`, { mode: 0o600 });
+}
+
+function consumeSpotifyState(state) {
+  const saved = readSpotifyState();
+  fs.rmSync(SPOTIFY_STATE_PATH, { force: true });
+  return !!state && saved?.state === state && Number(saved.expires_at) > Date.now();
+}
+
+async function requestSpotifyToken(body, req) {
+  const { clientId, clientSecret } = spotifyCredentials();
+  if (!clientId || !clientSecret) throw new Error('SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET not set');
+  const params = { ...body };
+  if (body.grant_type !== 'refresh_token') params.redirect_uri = spotifyRedirectUri(req);
+
+  const res = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams(params),
+  });
+  const payload = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Spotify token error ${res.status}: ${payload.error_description || payload.error || 'unknown error'}`);
+  }
+  return payload;
+}
+
+async function getSpotifyUserToken(req) {
+  const saved = readSpotifyToken();
+  if (!saved?.refresh_token && !saved?.access_token) return null;
+
+  if (saved.access_token && saved.expires_at && saved.expires_at > Date.now() + 60000) {
+    return saved;
+  }
+
+  if (!saved.refresh_token) return saved;
+
+  const refreshed = await requestSpotifyToken({
+    grant_type: 'refresh_token',
+    refresh_token: saved.refresh_token,
+  }, req);
+  const next = {
+    ...saved,
+    access_token: refreshed.access_token,
+    token_type: refreshed.token_type || saved.token_type || 'Bearer',
+    scope: refreshed.scope || saved.scope || SPOTIFY_SCOPES,
+    expires_at: Date.now() + Number(refreshed.expires_in || 3600) * 1000,
+    refresh_token: refreshed.refresh_token || saved.refresh_token,
+    updated_at: new Date().toISOString(),
+  };
+  writeSpotifyToken(next);
+  return next;
 }
 
 function buildAnnouncement(result, tracks, failedTracks, speechOnly) {
@@ -252,9 +361,10 @@ function makeProgramId() {
 }
 
 function callerTtsOptions() {
+  const provider = process.env.CALLER_TTS_PROVIDER || process.env.TTS_PROVIDER || 'volcengine';
   return {
     role: 'caller',
-    provider: process.env.CALLER_TTS_PROVIDER || process.env.TTS_PROVIDER || 'volcengine',
+    provider,
     apiKey: process.env.CALLER_TTS_API_KEY || process.env.VOLCENGINE_TTS_API_KEY,
     endpoint: process.env.CALLER_TTS_ENDPOINT || process.env.VOLCENGINE_TTS_ENDPOINT,
     resourceId: process.env.CALLER_TTS_RESOURCE_ID || process.env.VOLCENGINE_TTS_RESOURCE_ID,
@@ -263,7 +373,7 @@ function callerTtsOptions() {
     voice: process.env.CALLER_KOKORO_VOICE || process.env.KOKORO_VOICE,
     model: process.env.CALLER_KOKORO_MODEL || process.env.KOKORO_MODEL,
     baseUrl: process.env.CALLER_KOKORO_API_BASE || process.env.KOKORO_API_BASE,
-    format: process.env.CALLER_TTS_FORMAT || process.env.VOLCENGINE_TTS_FORMAT,
+    format: process.env.CALLER_TTS_FORMAT || (provider === 'kokoro' ? process.env.KOKORO_RESPONSE_FORMAT : process.env.VOLCENGINE_TTS_FORMAT),
     sampleRate: process.env.CALLER_TTS_SAMPLE_RATE || process.env.VOLCENGINE_TTS_SAMPLE_RATE,
     additions: process.env.CALLER_TTS_ADDITIONS || process.env.VOLCENGINE_TTS_ADDITIONS,
   };
@@ -388,6 +498,12 @@ async function resolveRequestedTracks(requestedTracks, options = {}) {
         title: track.title || requested.title || query,
         artist: track.artist || requested.artist || '',
         streamUrl: track.streamUrl,
+        source: track.source || '',
+        spotifyUri: track.spotifyUri || '',
+        spotifyUrl: track.spotifyUrl || '',
+        imageUrl: track.imageUrl || '',
+        album: track.album || '',
+        durationMs: track.durationMs || 0,
       };
       const skip = shouldSkipTrack(payloadTrack, avoidState);
       if (skip.skip) {
@@ -759,6 +875,99 @@ app.get('/api/plan/today', (req, res) => {
   res.json(plan || { message: '今日计划尚未生成' });
 });
 
+app.get('/auth/spotify', (req, res) => {
+  const { clientId } = spotifyCredentials();
+  if (!clientId) return res.status(500).send('SPOTIFY_CLIENT_ID not set');
+  const state = cryptoRandomState();
+  writeSpotifyState(state);
+  const url = new URL('https://accounts.spotify.com/authorize');
+  url.searchParams.set('client_id', clientId);
+  url.searchParams.set('response_type', 'code');
+  url.searchParams.set('redirect_uri', spotifyRedirectUri(req));
+  url.searchParams.set('scope', SPOTIFY_SCOPES);
+  url.searchParams.set('state', state);
+  res.redirect(url.toString());
+});
+
+app.get('/auth/spotify/callback', async (req, res) => {
+  const spotifyError = typeof req.query.error === 'string' ? req.query.error : '';
+  const spotifyErrorDescription = typeof req.query.error_description === 'string' ? req.query.error_description : '';
+  const code = typeof req.query.code === 'string' ? req.query.code : '';
+  const state = typeof req.query.state === 'string' ? req.query.state : '';
+  if (spotifyError) {
+    return res.status(400).send(`Spotify authorization failed: ${spotifyErrorDescription || spotifyError}`);
+  }
+  if (!code) return res.status(400).send('Missing Spotify authorization code. Start from /auth/spotify instead of opening this callback URL directly.');
+  if (!consumeSpotifyState(state)) return res.status(400).send('Invalid or expired Spotify authorization state');
+
+  try {
+    const token = await requestSpotifyToken({
+      grant_type: 'authorization_code',
+      code,
+    }, req);
+    writeSpotifyToken({
+      access_token: token.access_token,
+      refresh_token: token.refresh_token,
+      token_type: token.token_type || 'Bearer',
+      scope: token.scope || SPOTIFY_SCOPES,
+      expires_at: Date.now() + Number(token.expires_in || 3600) * 1000,
+      updated_at: new Date().toISOString(),
+    });
+    res.type('html').send('<!doctype html><meta charset="utf-8"><title>Spotify connected</title><p>Spotify connected. You can return to <a href="/">Claudio FM</a>.</p>');
+  } catch (err) {
+    console.error('[spotify-auth]', err.message);
+    res.status(500).send(err.message);
+  }
+});
+
+app.get('/api/spotify/status', async (req, res) => {
+  try {
+    const token = await getSpotifyUserToken(req);
+    res.json({ authenticated: !!token?.access_token, authUrl: '/auth/spotify' });
+  } catch (err) {
+    res.status(500).json({ authenticated: false, authUrl: '/auth/spotify', error: err.message });
+  }
+});
+
+app.get('/api/spotify/token', async (req, res) => {
+  try {
+    const token = await getSpotifyUserToken(req);
+    if (!token?.access_token) return res.status(401).json({ error: 'spotify_auth_required', authUrl: '/auth/spotify' });
+    res.json({ access_token: token.access_token, expires_at: token.expires_at });
+  } catch (err) {
+    res.status(500).json({ error: err.message, authUrl: '/auth/spotify' });
+  }
+});
+
+app.post('/api/spotify/play', async (req, res) => {
+  try {
+    const token = await getSpotifyUserToken(req);
+    if (!token?.access_token) return res.status(401).json({ error: 'spotify_auth_required', authUrl: '/auth/spotify' });
+
+    const deviceId = typeof req.body?.deviceId === 'string' ? req.body.deviceId : '';
+    const uri = typeof req.body?.uri === 'string' ? req.body.uri : '';
+    if (!deviceId || !uri) return res.status(400).json({ error: 'deviceId and uri required' });
+
+    const url = new URL('https://api.spotify.com/v1/me/player/play');
+    url.searchParams.set('device_id', deviceId);
+    const apiRes = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token.access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ uris: [uri] }),
+    });
+    const text = await apiRes.text().catch(() => '');
+    if (!apiRes.ok) {
+      return res.status(apiRes.status).json({ error: text || `Spotify play failed: ${apiRes.status}` });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/tts/caller', async (req, res) => {
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'text required' });
@@ -779,6 +988,10 @@ app.get('/api/tts/:filename', (req, res) => {
   if (!fs.existsSync(file)) return res.status(404).end();
   res.sendFile(file);
 });
+
+function cryptoRandomState() {
+  return crypto.randomBytes(24).toString('base64url');
+}
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 scheduler.init(broadcast, runRadioSegment);

@@ -12,10 +12,16 @@ function md5(text) {
   return crypto.createHash('md5').update(text).digest('hex');
 }
 
+function audioFormatForProvider(provider, options = {}) {
+  if (provider === 'kokoro') return options.format || process.env.KOKORO_RESPONSE_FORMAT || 'wav';
+  return options.format || process.env.VOLCENGINE_TTS_FORMAT || 'mp3';
+}
+
 function cachePath(text, provider = process.env.TTS_PROVIDER || 'volcengine', options = {}) {
   const voice = getVoiceForProvider(provider, options);
   const role = options.role || 'station';
-  return path.join(CACHE_DIR, `${md5(`${role}:${provider}:${voice}:${text}`)}.mp3`);
+  const format = audioFormatForProvider(provider, options).replace(/[^a-z0-9]/gi, '') || 'mp3';
+  return path.join(CACHE_DIR, `${md5(`${role}:${provider}:${voice}:${format}:${text}`)}.${format}`);
 }
 
 function synthesize(text, options = {}) {
@@ -233,8 +239,9 @@ function synthesizeFish(text, outPath, options = {}) {
 
 async function synthesizeKokoro(text, outPath, options = {}) {
   const baseUrl = (options.baseUrl || process.env.KOKORO_API_BASE || 'http://127.0.0.1:8880').replace(/\/+$/, '');
-  const voice = options.voice || process.env.KOKORO_VOICE || 'zf_xiaoxiao';
+  const voice = options.voice || process.env.KOKORO_VOICE || 'af_heart';
   const model = options.model || process.env.KOKORO_MODEL || 'kokoro';
+  const responseFormat = options.format || process.env.KOKORO_RESPONSE_FORMAT || 'wav';
 
   const res = await fetch(`${baseUrl}/v1/audio/speech`, {
     method: 'POST',
@@ -243,7 +250,7 @@ async function synthesizeKokoro(text, outPath, options = {}) {
       model,
       voice,
       input: text,
-      response_format: 'mp3',
+      response_format: responseFormat,
     }),
   });
 

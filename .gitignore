@@ -1,6 +1,8 @@
 node_modules/
 .env
 cache/tts/*.mp3
+cache/tts/*.wav
+kororo-voice/
 docs/
 *.sqlite
 *.db
@@ -24,3 +26,4 @@ skills/netease-music/data/*
 
 # Claudio local Netease login state. May contain cookies and private QR pages.
 data/netease/*
+data/spotify/*

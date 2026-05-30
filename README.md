@@ -73,6 +73,31 @@ VOLCENGINE_TTS_VOICE_TYPE=en_female_nadia_tips_emo_v2_mars_bigtts
 - Activate and get the Doubao Speech API key from [Volcengine Speech Settings](https://console.volcengine.com/speech/new/setting/activate?ResourceID=volc.service_type.10029&projectName=default).
 - Doubao Speech currently includes 20,000 free characters for the 1.0 voice model and 20,000 free characters for the 2.0 voice model.
 
+### Optional Providers
+
+Spotify can be used for music metadata and Web Playback SDK playback. Set these values if you want Spotify support:
+
+```bash
+MUSIC_PROVIDER=auto
+SPOTIFY_CLIENT_ID=your_spotify_client_id
+SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/auth/spotify/callback
+```
+
+Then open `http://localhost:8080/auth/spotify` once to connect your Spotify account. Spotify playback requires Spotify Premium. Claudio stores the local Spotify token under `data/spotify/`, which is ignored by Git.
+
+Kokoro can be used as a local TTS sidecar:
+
+```bash
+yarn kokoro:start
+# or
+npm run kokoro:start
+```
+
+Then set `TTS_PROVIDER=kokoro` or `CALLER_TTS_PROVIDER=kokoro` in `.env`.
+
+Gemini can be used as an OpenAI-compatible LLM provider by setting `LLM_PROVIDER=gemini` and `GEMINI_API_KEY`.
+
 Start Claudio:
 
 ```bash
@@ -89,6 +114,14 @@ Open:
 
 ```text
 http://localhost:8080
+```
+
+Run a quick syntax check:
+
+```bash
+yarn check
+# or
+npm run check
 ```
 
 ## Current Version
@@ -172,6 +205,31 @@ VOLCENGINE_TTS_VOICE_TYPE=en_female_nadia_tips_emo_v2_mars_bigtts
 - 豆包语音 API Key 激活与获取地址：[火山引擎语音技术控制台](https://console.volcengine.com/speech/new/setting/activate?ResourceID=volc.service_type.10029&projectName=default)。
 - 豆包语音目前赠送 1.0 语音模型 20,000 字免费用量，以及 2.0 语音模型 20,000 字免费用量。
 
+### 可选服务
+
+Spotify 可用于音乐元数据和 Web Playback SDK 播放。需要启用时填写：
+
+```bash
+MUSIC_PROVIDER=auto
+SPOTIFY_CLIENT_ID=你的_Spotify_Client_ID
+SPOTIFY_CLIENT_SECRET=你的_Spotify_Client_Secret
+SPOTIFY_REDIRECT_URI=http://127.0.0.1:8080/auth/spotify/callback
+```
+
+然后打开 `http://localhost:8080/auth/spotify` 完成一次授权。Spotify 播放需要 Spotify Premium；本地 token 会保存在 `data/spotify/`，该目录已被 Git 忽略。
+
+Kokoro 可作为本地 TTS sidecar：
+
+```bash
+yarn kokoro:start
+# 或
+npm run kokoro:start
+```
+
+然后在 `.env` 中设置 `TTS_PROVIDER=kokoro` 或 `CALLER_TTS_PROVIDER=kokoro`。
+
+Gemini 可作为兼容 OpenAI SDK 的 LLM provider：设置 `LLM_PROVIDER=gemini` 和 `GEMINI_API_KEY` 即可。
+
 启动 Claudio：
 
 ```bash
@@ -187,6 +245,14 @@ yarn start
 
 ```text
 http://localhost:8080
+```
+
+运行快速语法检查：
+
+```bash
+yarn check
+# 或
+npm run check
 ```
 
 ## 当前版本

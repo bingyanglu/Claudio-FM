@@ -758,6 +758,7 @@ html, body {
 <audio id="tts-audio" preload="auto"></audio>
 <audio id="music-audio" preload="auto"></audio>
 
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 <script>
 /* ── Refs ─────────────────────────────────────────────────────────── */
 const ttsAudio   = document.getElementById('tts-audio');
@@ -809,6 +810,16 @@ function buildStartMessage() {
   return `It's ${hour}:00 on a ${day}. You're on air — open the station. Pick whatever fits the moment.`;
 }
 let startingRadio = false;
+let spotifyPlayer = null;
+let spotifyDeviceId = '';
+let spotifyReady = false;
+let spotifyActive = false;
+let spotifyPaused = true;
+let spotifyTrackStartedAt = 0;
+let spotifyTrackPositionMs = 0;
+let spotifyTrackDurationMs = 0;
+let spotifyEndTimer = null;
+let spotifyProgressTimer = null;
 
 function syncDjLanguageControl() {
   djLanguageControl.querySelectorAll('button').forEach(button => {
@@ -847,7 +858,7 @@ function syncVolumeControls() {
   lblDjVolume.textContent = pctLabel(djVolume);
   inMusicVolume.value = Math.round(baseMusicVolume * 100);
   lblMusicVolume.textContent = pctLabel(baseMusicVolume);
-  if (!ducking) musicAudio.volume = baseMusicVolume;
+  if (!ducking) setPlaybackVolume(baseMusicVolume);
 }
 
 function setDjVolume(value) {
@@ -862,13 +873,19 @@ function setMusicVolume(value) {
   localStorage.setItem('claudio:music-volume', Math.round(baseMusicVolume * 100));
   lblMusicVolume.textContent = pctLabel(baseMusicVolume);
   if (ducking) {
-    musicAudio.volume = duckedMusicVolume();
+    setPlaybackVolume(duckedMusicVolume());
   } else {
-    musicAudio.volume = baseMusicVolume;
+    setPlaybackVolume(baseMusicVolume);
   }
 }
 
 syncVolumeControls();
+
+function setPlaybackVolume(value) {
+  const volume = Math.max(0, Math.min(1, value));
+  musicAudio.volume = volume;
+  if (spotifyPlayer) spotifyPlayer.setVolume(volume).catch(console.error);
+}
 
 /* ── Fullscreen ───────────────────────────────────────────────────── */
 function fullscreenElement() {
@@ -1036,6 +1053,118 @@ function setPlaying(v) {
   setRadioStatus(v ? 'Playing' : 'Paused');
 }
 
+function musicIsPlaying() {
+  return spotifyActive ? !spotifyPaused : (!!musicAudio.src && !musicAudio.paused && !musicAudio.ended);
+}
+
+function musicIsPaused() {
+  return spotifyActive ? spotifyPaused : musicAudio.paused;
+}
+
+function playbackDuration() {
+  return spotifyActive ? spotifyTrackDurationMs / 1000 : (musicAudio.duration || 0);
+}
+
+function playbackCurrentTime() {
+  if (!spotifyActive) return musicAudio.currentTime || 0;
+  if (spotifyPaused) return spotifyTrackPositionMs / 1000;
+  return (spotifyTrackPositionMs + Date.now() - spotifyTrackStartedAt) / 1000;
+}
+
+function playbackIsEmpty() {
+  return spotifyActive ? !spotifyTrackDurationMs : (!musicAudio.src || musicAudio.ended);
+}
+
+function clearSpotifyTimers() {
+  clearTimeout(spotifyEndTimer);
+  clearInterval(spotifyProgressTimer);
+  spotifyEndTimer = null;
+  spotifyProgressTimer = null;
+}
+
+function updateSpotifyProgressUi() {
+  if (!spotifyActive) return;
+  const dur = playbackDuration();
+  const cur = playbackCurrentTime();
+  playerTime.textContent = fmt(cur);
+  if (dur > 0) {
+    updateScrubber(Math.min(1, cur / dur));
+    const remaining = dur - cur;
+    if (remaining <= REFILL_LEAD_S) maybeRefillAhead();
+    if (remaining <= SEGUE_LEAD_S) maybeStartOutroTalk();
+  }
+}
+
+function scheduleSpotifyEnd() {
+  clearSpotifyTimers();
+  if (!spotifyActive || spotifyPaused || !spotifyTrackDurationMs) return;
+  const remainingMs = Math.max(500, spotifyTrackDurationMs - (spotifyTrackPositionMs + Date.now() - spotifyTrackStartedAt));
+  spotifyEndTimer = setTimeout(() => {
+    if (!playNext()) setRadioStatus('Paused');
+  }, remainingMs + 800);
+  spotifyProgressTimer = setInterval(updateSpotifyProgressUi, 1000);
+}
+
+async function fetchSpotifyToken() {
+  const res = await fetch('/api/spotify/token');
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({}));
+    metaSub.innerHTML = `Spotify authorization required · <a href="${body.authUrl || '/auth/spotify'}">Connect</a>`;
+    return null;
+  }
+  if (!res.ok) throw new Error(await res.text());
+  const body = await res.json();
+  return body.access_token;
+}
+
+function initSpotifyPlayerWhenReady() {
+  if (!window.Spotify || spotifyPlayer) return;
+  spotifyPlayer = new Spotify.Player({
+    name: 'Claudio FM',
+    getOAuthToken: async cb => {
+      const token = await fetchSpotifyToken();
+      if (token) cb(token);
+    },
+    volume: baseMusicVolume,
+  });
+
+  spotifyPlayer.addListener('ready', ({ device_id }) => {
+    spotifyDeviceId = device_id;
+    spotifyReady = true;
+    console.info('[spotify] ready', device_id);
+  });
+  spotifyPlayer.addListener('not_ready', ({ device_id }) => {
+    if (spotifyDeviceId === device_id) spotifyReady = false;
+    console.warn('[spotify] not ready', device_id);
+  });
+  spotifyPlayer.addListener('initialization_error', ({ message }) => console.error('[spotify]', message));
+  spotifyPlayer.addListener('authentication_error', ({ message }) => {
+    spotifyReady = false;
+    metaSub.innerHTML = 'Spotify authorization required · <a href="/auth/spotify">Connect</a>';
+    console.error('[spotify]', message);
+  });
+  spotifyPlayer.addListener('account_error', ({ message }) => {
+    spotifyReady = false;
+    metaSub.textContent = 'Spotify Premium is required for web playback';
+    console.error('[spotify]', message);
+  });
+  spotifyPlayer.addListener('player_state_changed', state => {
+    if (!state || !spotifyActive) return;
+    spotifyPaused = state.paused;
+    spotifyTrackPositionMs = state.position || 0;
+    spotifyTrackDurationMs = state.duration || spotifyTrackDurationMs;
+    spotifyTrackStartedAt = Date.now();
+    setPlaying(!spotifyPaused);
+    updateSpotifyProgressUi();
+    scheduleSpotifyEnd();
+  });
+
+  spotifyPlayer.connect().catch(console.error);
+}
+
+window.onSpotifyWebPlaybackSDKReady = initSpotifyPlayerWhenReady;
+if (window.Spotify) initSpotifyPlayerWhenReady();
+
 musicAudio.addEventListener('play',  () => setPlaying(true));
 musicAudio.addEventListener('pause', () => setPlaying(false));
 musicAudio.addEventListener('ended', () => {
@@ -1088,6 +1217,10 @@ musicAudio.addEventListener('timeupdate', () => {
 });
 
 playBtn.addEventListener('click', async () => {
+  if (spotifyActive && spotifyPlayer) {
+    spotifyPlayer.togglePlay().catch(console.error);
+    return;
+  }
   if (musicAudio.src && musicAudio.paused) {
     musicAudio.play().catch(console.error);
     return;
@@ -1100,6 +1233,12 @@ playBtn.addEventListener('click', async () => {
 });
 
 scrubber.addEventListener('click', e => {
+  if (spotifyActive && spotifyPlayer && spotifyTrackDurationMs) {
+    const r = scrubber.getBoundingClientRect();
+    const pct = (e.clientX - r.left) / r.width;
+    spotifyPlayer.seek(Math.max(0, Math.min(1, pct)) * spotifyTrackDurationMs).catch(console.error);
+    return;
+  }
   if (!musicAudio.src || !musicAudio.duration) return;
   const r = scrubber.getBoundingClientRect();
   const pct = (e.clientX - r.left) / r.width;
@@ -1113,7 +1252,7 @@ function fadeMusicVolume(target, ms = 260) {
   const startedAt = performance.now();
   volumeFadeTimer = setInterval(() => {
     const pct = Math.min(1, (performance.now() - startedAt) / ms);
-    musicAudio.volume = start + (target - start) * pct;
+    setPlaybackVolume(start + (target - start) * pct);
     if (pct >= 1) {
       clearInterval(volumeFadeTimer);
       volumeFadeTimer = null;
@@ -1124,7 +1263,7 @@ function duckedMusicVolume() {
   return baseMusicVolume * DUCKED_VOLUME_RATIO;
 }
 function duckMusic() {
-  if (!musicAudio.src || musicAudio.paused) return;
+  if (!musicIsPlaying()) return;
   ducking = true;
   fadeMusicVolume(duckedMusicVolume());
 }
@@ -1136,7 +1275,7 @@ function restoreMusicVolume() {
 function afterTtsFinished() {
   finishKaraoke();
   restoreMusicVolume();
-  if (!musicAudio.paused && !musicAudio.ended) {
+  if (musicIsPlaying()) {
     setRadioStatus('Playing');
   } else {
     setRadioStatus('Paused');
@@ -1418,9 +1557,9 @@ function speakSegment(transcript, ttsUrl, onEnd) {
 }
 
 function isOutroWindowOpen() {
-  if (!musicAudio.src || musicAudio.paused || musicAudio.ended) return false;
-  const dur = musicAudio.duration || 0;
-  const cur = musicAudio.currentTime || 0;
+  if (!musicIsPlaying()) return false;
+  const dur = playbackDuration();
+  const cur = playbackCurrentTime();
   return dur > 0 && (dur - cur) <= SEGUE_LEAD_S;
 }
 
@@ -1467,8 +1606,8 @@ function maybeRefillAhead() {
   const remainingTracks = queue.length - queueIdx - 1;
   const bufferedTracks = queue.length - queueIdx;
   if (bufferedTracks >= MAX_BUFFER_TRACKS) return;
-  const dur = musicAudio.duration || 0;
-  const cur = musicAudio.currentTime || 0;
+  const dur = playbackDuration();
+  const cur = playbackCurrentTime();
   const lastTrackIsPlaying = queueIdx >= queue.length - 1;
   const nearLastTrackEnd = lastTrackIsPlaying && dur > 0 && (dur - cur) <= REFILL_LEAD_S;
   if (remainingTracks < REFILL_LOW_WATER_TRACKS || nearLastTrackEnd) autoRefill();
@@ -1519,7 +1658,7 @@ function autoRefill() {
     .finally(() => { autoRefilling = false; });
 }
 
-function playTrack(track) {
+async function playTrack(track) {
   metaName.textContent = track.title || track.query;
   metaSub.textContent = track.artist ? `Now Playing · ${track.artist}` : 'Now Playing';
   if (track.artist) {
@@ -1529,8 +1668,39 @@ function playTrack(track) {
     metaSourceText.textContent = '';
     metaSource.style.display = 'none';
   }
+  if (track.spotifyUri && spotifyReady && spotifyDeviceId) {
+    try {
+      musicAudio.pause();
+      musicAudio.removeAttribute('src');
+      musicAudio.load();
+      spotifyActive = true;
+      spotifyPaused = false;
+      spotifyTrackDurationMs = Number(track.durationMs || 0);
+      spotifyTrackPositionMs = 0;
+      spotifyTrackStartedAt = Date.now();
+      await fetch('/api/spotify/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: spotifyDeviceId, uri: track.spotifyUri }),
+      }).then(async res => {
+        if (!res.ok) throw new Error(await res.text());
+      });
+      setPlaybackVolume((!ttsAudio.paused && !ttsAudio.ended) ? duckedMusicVolume() : baseMusicVolume);
+      setPlaying(true);
+      updateSpotifyProgressUi();
+      scheduleSpotifyEnd();
+      return;
+    } catch (err) {
+      console.warn('[spotify-playback] falling back to audio stream', err);
+      spotifyActive = false;
+      clearSpotifyTimers();
+    }
+  }
+
+  spotifyActive = false;
+  clearSpotifyTimers();
   musicAudio.src = track.streamUrl;
-  musicAudio.volume = (!ttsAudio.paused && !ttsAudio.ended) ? duckedMusicVolume() : baseMusicVolume;
+  setPlaybackVolume((!ttsAudio.paused && !ttsAudio.ended) ? duckedMusicVolume() : baseMusicVolume);
   musicAudio.play().catch(console.error);
 }
 
@@ -1569,7 +1739,7 @@ function playNext() {
 
 function enqueueAndPlay(tracks) {
   if (!tracks?.length) return;
-  const wasEmpty = !musicAudio.src || musicAudio.ended;
+  const wasEmpty = playbackIsEmpty();
   const existingKeys = new Set(queue.map(trackIdentity).filter(Boolean));
   const existingUrls = new Set(queue.map(track => track.streamUrl).filter(Boolean));
   const freshTracks = tracks.filter(track => {
@@ -1700,7 +1870,7 @@ function handleWsMessage(msg) {
     }
 
     // Capture playback state BEFORE enqueueing changes it.
-    const musicLive = !!musicAudio.src && !musicAudio.paused && !musicAudio.ended;
+    const musicLive = musicIsPlaying();
     const programmed = msg.trigger === 'scheduler' || msg.trigger === 'autoRefill';
     const tracks = msg.tracks || [];
     const queueStart = queue.length;
@@ -1740,8 +1910,14 @@ function handleWsMessage(msg) {
 
   if (msg.type === 'control') {
     if (msg.action === 'next')   playNext();
-    if (msg.action === 'pause')  musicAudio.pause();
-    if (msg.action === 'resume') musicAudio.play().catch(console.error);
+    if (msg.action === 'pause')  {
+      if (spotifyActive && spotifyPlayer) spotifyPlayer.pause().catch(console.error);
+      else musicAudio.pause();
+    }
+    if (msg.action === 'resume') {
+      if (spotifyActive && spotifyPlayer) spotifyPlayer.resume().catch(console.error);
+      else musicAudio.play().catch(console.error);
+    }
     if (msg.action === 'volume') {
       setMusicVolume(baseMusicVolume + msg.delta / 100);
     }

@@ -6,6 +6,8 @@
   "scripts": {
     "start": "node scripts/start.js",
     "start:server": "node server.js",
+    "check": "for f in *.js scripts/*.js; do node --check \"$f\"; done",
+    "kokoro:start": "node scripts/kokoro-api.js",
     "netease:check": "node scripts/netease-status.js",
     "netease:login": "node scripts/netease-login.js"
   },
@@ -13,6 +15,7 @@
     "better-sqlite3": "^12.10.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "kokoro-js": "^1.2.1",
     "node-cron": "^3.0.3",
     "openai": "^6.9.1",
     "ws": "^8.17.0"

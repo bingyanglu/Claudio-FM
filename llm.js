@@ -6,10 +6,14 @@ const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
 const DEEPSEEK_REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT || '';
 const DEEPSEEK_THINKING = process.env.DEEPSEEK_THINKING || '';
+const GEMINI_BASE_URL = process.env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+const GEMINI_REASONING_EFFORT = process.env.GEMINI_REASONING_EFFORT || '';
 
 async function generateJson(prompt, options = {}) {
   const provider = options.provider || DEFAULT_PROVIDER;
   if (provider === 'deepseek') return callDeepSeek(prompt, options);
+  if (provider === 'gemini') return callGemini(prompt, options);
   if (provider === 'claude_cli') return callClaudeCli(prompt, options);
   throw new Error(`Unsupported LLM_PROVIDER: ${provider}`);
 }
@@ -48,6 +52,42 @@ async function callDeepSeek(prompt, options = {}) {
   const raw = completion.choices?.[0]?.message?.content?.trim() || '';
   const parsed = parseResponse(raw);
   logParsedResponse('deepseek', elapsed, parsed, raw);
+  return parsed;
+}
+
+async function callGemini(prompt, options = {}) {
+  if (!process.env.GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY not set');
+  }
+
+  const OpenAI = await loadOpenAI();
+  const client = new OpenAI({
+    baseURL: process.env.GEMINI_BASE_URL || GEMINI_BASE_URL,
+    apiKey: process.env.GEMINI_API_KEY,
+  });
+  const model = options.model || process.env.GEMINI_MODEL || GEMINI_MODEL;
+  const startAt = Date.now();
+  console.log(`[LLM:gemini] 调用中，model ${model}，prompt ${prompt.length} 字符…`);
+
+  const request = {
+    model,
+    messages: [
+      { role: 'system', content: 'You are Claudio FM. Return strict JSON only.' },
+      { role: 'user', content: prompt },
+    ],
+    stream: false,
+  };
+  if (GEMINI_REASONING_EFFORT) request.reasoning_effort = GEMINI_REASONING_EFFORT;
+
+  const completion = await withTimeout(
+    client.chat.completions.create(request),
+    options.timeoutMs || DEFAULT_TIMEOUT_MS,
+    `Gemini request timed out after ${Math.round((options.timeoutMs || DEFAULT_TIMEOUT_MS) / 1000)}s`
+  );
+  const elapsed = ((Date.now() - startAt) / 1000).toFixed(1);
+  const raw = completion.choices?.[0]?.message?.content?.trim() || '';
+  const parsed = parseResponse(raw);
+  logParsedResponse('gemini', elapsed, parsed, raw);
   return parsed;
 }
 
