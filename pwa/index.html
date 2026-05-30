@@ -1050,7 +1050,7 @@ function setPlaying(v) {
   iconPlay.style.display  = v ? 'none' : '';
   iconPause.style.display = v ? '' : 'none';
   if (!ttsAudio.paused && !ttsAudio.ended) return;
-  setRadioStatus(v ? 'Playing' : 'Paused');
+  setRadioStatus(v ? 'Playing' : awaitingNextTrack ? 'On Air' : 'Paused');
 }
 
 function musicIsPlaying() {
@@ -1100,7 +1100,7 @@ function scheduleSpotifyEnd() {
   if (!spotifyActive || spotifyPaused || !spotifyTrackDurationMs) return;
   const remainingMs = Math.max(500, spotifyTrackDurationMs - (spotifyTrackPositionMs + Date.now() - spotifyTrackStartedAt));
   spotifyEndTimer = setTimeout(() => {
-    if (!playNext()) setRadioStatus('Paused');
+    playNext();
   }, remainingMs + 800);
   spotifyProgressTimer = setInterval(updateSpotifyProgressUi, 1000);
 }
@@ -1173,7 +1173,7 @@ musicAudio.addEventListener('ended', () => {
     duration: musicAudio.duration,
     currentTime: musicAudio.currentTime,
   });
-  if (!playNext()) setRadioStatus('Paused');
+  playNext();
 });
 musicAudio.addEventListener('loadedmetadata', () => {
   console.info('[music] metadata', {
@@ -1186,7 +1186,7 @@ musicAudio.addEventListener('loadedmetadata', () => {
 musicAudio.addEventListener('error', () => {
   console.warn('[music] playback failed', musicAudio.error);
   addTurn('Claudio', "That link dropped out. I'll skip ahead and keep the set moving.");
-  if (!playNext()) setRadioStatus('Paused');
+  playNext();
 });
 /* ── Prefetch next track ──────────────────────────────────────────── */
 const prefetchEl = document.createElement('audio');
@@ -1221,10 +1221,16 @@ playBtn.addEventListener('click', async () => {
     spotifyPlayer.togglePlay().catch(console.error);
     return;
   }
-  if (musicAudio.src && musicAudio.paused) {
+  if (awaitingNextTrack) {
+    setRadioStatus('On Air');
+    maybeRefillAhead();
+    return;
+  }
+  if (musicAudio.src && musicAudio.paused && !musicAudio.ended) {
     musicAudio.play().catch(console.error);
     return;
   }
+  if (musicAudio.src && musicAudio.ended && playNext()) return;
   if (!musicAudio.paused) {
     musicAudio.pause();
     return;
@@ -1277,6 +1283,8 @@ function afterTtsFinished() {
   restoreMusicVolume();
   if (musicIsPlaying()) {
     setRadioStatus('Playing');
+  } else if (awaitingNextTrack) {
+    setRadioStatus('On Air');
   } else {
     setRadioStatus('Paused');
   }
@@ -1473,6 +1481,7 @@ replayBtn.addEventListener('click', () => {
 let queue = [], queueIdx = 0;
 let autoRefilling = false;
 let segueStarted = false;     // the DJ already spoke over the current song's outro
+let awaitingNextTrack = false;
 let scriptSegments = [];
 let handledSegmentIds = new Set();
 let programClockStartedAt = null;
@@ -1659,6 +1668,7 @@ function autoRefill() {
 }
 
 async function playTrack(track) {
+  awaitingNextTrack = false;
   metaName.textContent = track.title || track.query;
   metaSub.textContent = track.artist ? `Now Playing · ${track.artist}` : 'Now Playing';
   if (track.artist) {
@@ -1699,6 +1709,13 @@ async function playTrack(track) {
 
   spotifyActive = false;
   clearSpotifyTimers();
+  if (!track.streamUrl) {
+    metaSub.innerHTML = track.spotifyUri
+      ? 'Spotify playback is not ready · <a href="/auth/spotify">Connect</a>'
+      : 'No playable audio source';
+    setRadioStatus('Paused');
+    return;
+  }
   musicAudio.src = track.streamUrl;
   setPlaybackVolume((!ttsAudio.paused && !ttsAudio.ended) ? duckedMusicVolume() : baseMusicVolume);
   musicAudio.play().catch(console.error);
@@ -1706,6 +1723,7 @@ async function playTrack(track) {
 
 function playNext() {
   if (queueIdx < queue.length - 1) {
+    awaitingNextTrack = false;
     const spokenDuringOutro = segueStarted;
     queueIdx++;
     segueStarted = false;
@@ -1733,13 +1751,15 @@ function playNext() {
     maybeRefillAhead();
     return true;
   }
+  awaitingNextTrack = true;
+  setRadioStatus('On Air');
   autoRefill();
   return false;
 }
 
 function enqueueAndPlay(tracks) {
   if (!tracks?.length) return;
-  const wasEmpty = playbackIsEmpty();
+  const shouldAutoResume = awaitingNextTrack || playbackIsEmpty();
   const existingKeys = new Set(queue.map(trackIdentity).filter(Boolean));
   const existingUrls = new Set(queue.map(track => track.streamUrl).filter(Boolean));
   const freshTracks = tracks.filter(track => {
@@ -1753,7 +1773,8 @@ function enqueueAndPlay(tracks) {
   if (!freshTracks.length) return;
   queue = [...queue, ...freshTracks];
   renderQueue();
-  if (wasEmpty) {
+  if (shouldAutoResume) {
+    awaitingNextTrack = false;
     segueStarted = false;
     queueIdx = queue.length - freshTracks.length;
     playTrack(queue[queueIdx]);
@@ -1855,6 +1876,10 @@ function handleWsMessage(msg) {
     if (msg.jobType === 'music_refill') {
       autoRefilling = false;
       lastRefillAt = Date.now();
+      if (awaitingNextTrack) {
+        awaitingNextTrack = false;
+        setRadioStatus('Paused');
+      }
     }
     if (msg.jobType === 'program_start') {
       setRadioStatus('Paused');

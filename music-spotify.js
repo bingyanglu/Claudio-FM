@@ -160,13 +160,12 @@ async function getTrack(query) {
 
     const streamUrl = await resolveStreamUrl(track);
     if (!streamUrl) {
-      console.warn(`[spotify] found metadata but no playable stream: ${track.title} - ${track.artist || 'unknown'}`);
-      return null;
+      console.warn(`[spotify] no fallback stream; using Spotify Web Playback URI: ${track.title} - ${track.artist || 'unknown'}`);
     }
 
     return {
       ...track,
-      streamUrl,
+      streamUrl: streamUrl || '',
       lyrics: null,
     };
   } catch (err) {

@@ -400,7 +400,7 @@ function trackIdentity(track) {
 }
 
 function trackUrlIdentity(track) {
-  return String(track?.streamUrl || track?.source_url || '').trim();
+  return String(track?.spotifyUri || track?.streamUrl || track?.source_url || '').trim();
 }
 
 function parseRequestedTrack(query) {
@@ -486,7 +486,7 @@ async function resolveRequestedTracks(requestedTracks, options = {}) {
   for (let i = 0; i < requestedTracks.length; i++) {
     const query = requestedTracks[i];
     const track = await getTrack(query);
-    if (track?.streamUrl) {
+    if (track?.streamUrl || track?.spotifyUri) {
       const requested = parseRequestedTrack(query);
       if (!trackMatchesRequest(requested, track)) {
         failedTracks.push(`${query} (resolved mismatch: ${track.title}${track.artist ? ' — ' + track.artist : ''})`);
@@ -497,7 +497,7 @@ async function resolveRequestedTracks(requestedTracks, options = {}) {
         query,
         title: track.title || requested.title || query,
         artist: track.artist || requested.artist || '',
-        streamUrl: track.streamUrl,
+        streamUrl: track.streamUrl || '',
         source: track.source || '',
         spotifyUri: track.spotifyUri || '',
         spotifyUrl: track.spotifyUrl || '',
@@ -515,7 +515,7 @@ async function resolveRequestedTracks(requestedTracks, options = {}) {
       avoidState.batchTrackKeys.add(trackIdentity(payloadTrack));
       const urlIdentity = trackUrlIdentity(payloadTrack);
       if (urlIdentity) avoidState.batchUrlKeys.add(urlIdentity);
-      addPlay({ title: payloadTrack.title, artist: payloadTrack.artist, source_url: payloadTrack.streamUrl });
+      addPlay({ title: payloadTrack.title, artist: payloadTrack.artist, source_url: payloadTrack.streamUrl || payloadTrack.spotifyUri });
       console.log(`[音乐] ✓ ${i + 1}/${requestedTracks.length} 找到: ${payloadTrack.title}${payloadTrack.artist ? ' — ' + payloadTrack.artist : ''}`);
     } else {
       failedTracks.push(query);
