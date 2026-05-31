@@ -12,6 +12,7 @@ const { callClaude } = require('./claude');
 const { synthesize } = require('./tts');
 const { getTrack } = require('./music');
 const { addPlay, addMessage, recentPlays, getPref } = require('./state');
+const { environmentSnapshot, updateEnvironment } = require('./env-context');
 const scheduler = require('./scheduler');
 
 const app = express();
@@ -26,13 +27,51 @@ const clients = new Set();
 
 wss.on('connection', ws => {
   clients.add(ws);
+  sendTtsUnavailableIfNeeded(ws);
   ws.on('close', () => clients.delete(ws));
 });
+
+function sendSystemLog(ws, level, message, details = {}) {
+  if (ws.readyState !== 1) return;
+  ws.send(JSON.stringify({
+    type: 'system-log',
+    level,
+    message,
+    details,
+    at: Date.now(),
+  }));
+}
 
 function broadcast(payload) {
   const msg = JSON.stringify(payload);
   for (const ws of clients) {
     if (ws.readyState === 1) ws.send(msg);
+  }
+}
+
+function broadcastSystemLog(level, message, details = {}) {
+  for (const ws of clients) sendSystemLog(ws, level, message, details);
+}
+
+function kokoroBaseUrl() {
+  return (process.env.KOKORO_API_BASE || 'http://127.0.0.1:8880').replace(/\/+$/, '');
+}
+
+async function sendTtsUnavailableIfNeeded(ws) {
+  if ((process.env.TTS_PROVIDER || 'volcengine') !== 'kokoro') return;
+
+  const baseUrl = kokoroBaseUrl();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+  try {
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  } catch (err) {
+    sendSystemLog(ws, 'error', `tts not started: Kokoro unreachable at ${baseUrl}`, {
+      error: err.name === 'AbortError' ? 'health check timed out' : err.message,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -337,6 +376,12 @@ async function synthesizeSegments(segments) {
       segment.status = 'tts_failed';
       segment.error = err.message;
       console.error(`[TTS] ${segment.type} 合成失败:`, err.message);
+      const provider = process.env.TTS_PROVIDER || 'volcengine';
+      if (provider === 'kokoro' && /fetch failed|ECONNREFUSED|failed/i.test(err.message)) {
+        broadcastSystemLog('error', `tts not started: Kokoro unreachable at ${kokoroBaseUrl()}`, {
+          error: err.message,
+        });
+      }
     }
   }
   return segments;
@@ -856,6 +901,15 @@ app.get('/api/now', (req, res) => {
   res.json(nowPlaying || { playing: false });
 });
 
+app.get('/api/environment', async (req, res) => {
+  res.json(await environmentSnapshot({ refreshWeather: true }));
+});
+
+app.post('/api/environment', async (req, res) => {
+  updateEnvironment(req.body || {});
+  res.json(await environmentSnapshot({ refreshWeather: true }));
+});
+
 app.get('/api/next', async (req, res) => {
   broadcast({ type: 'control', action: 'next' });
   res.json({ action: 'next' });
@@ -978,6 +1032,12 @@ app.post('/api/tts/caller', async (req, res) => {
     res.json({ ttsUrl: '/api/tts/' + path.basename(f) });
   } catch (err) {
     console.error('[caller-tts]', err);
+    const provider = process.env.CALLER_TTS_PROVIDER || process.env.TTS_PROVIDER || 'volcengine';
+    if (provider === 'kokoro' && /fetch failed|ECONNREFUSED|failed/i.test(err.message)) {
+      broadcastSystemLog('error', `tts not started: Kokoro unreachable at ${kokoroBaseUrl()}`, {
+        error: err.message,
+      });
+    }
     res.status(500).json({ error: err.message });
   }
 });

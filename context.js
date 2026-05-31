@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { recentPlays, recentMessages } = require('./state');
+const { environmentPromptText } = require('./env-context');
 
 function readFile(filePath) {
   try { return fs.readFileSync(filePath, 'utf-8'); } catch { return ''; }
@@ -11,8 +12,7 @@ function sharedContext({ includeTaste = true, includeDialog = true, recentPlayLi
   const taste = readFile(path.join(__dirname, 'user/taste.md'));
   const routines = readFile(path.join(__dirname, 'user/routines.md'));
   const moodRules = readFile(path.join(__dirname, 'user/mood-rules.md'));
-  const now = new Date();
-  const env = `当前时间：${now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}`;
+  const env = environmentPromptText();
   const plays = recentPlays(recentPlayLimit);
   const historyText = plays.length
     ? plays.map(p => `- ${p.title}${p.artist ? ' — ' + p.artist : ''}`).join('\n')

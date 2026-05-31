@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const path = require('path');
-const { spawn } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const {
   boolEnv,
   bootstrapNeteaseLogin,
@@ -14,6 +14,7 @@ const DEFAULT_NETEASE_ARGS = ['NeteaseCloudMusicApi@latest'];
 const DEFAULT_NETEASE_READY_TIMEOUT_MS = 60000;
 const DEFAULT_KOKORO_BASE = 'http://127.0.0.1:8880';
 const DEFAULT_KOKORO_READY_TIMEOUT_MS = 120000;
+const DEFAULT_CLAUDIO_PORT = '8080';
 
 const children = new Set();
 let shuttingDown = false;
@@ -43,6 +44,10 @@ function kokoroPort(baseUrl) {
   }
 }
 
+function claudioPort() {
+  return String(process.env.PORT || DEFAULT_CLAUDIO_PORT);
+}
+
 function kokoroBaseUrl() {
   return (process.env.KOKORO_API_BASE || DEFAULT_KOKORO_BASE).replace(/\/+$/, '');
 }
@@ -68,6 +73,86 @@ function cleanNpmEnv(env) {
   }
   delete clean.INIT_CWD;
   return clean;
+}
+
+function execFileText(command, args) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function findListeningPids(port) {
+  if (process.platform === 'win32') {
+    console.warn('[start] Automatic port cleanup is not implemented on Windows.');
+    return [];
+  }
+
+  try {
+    const stdout = await execFileText('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
+    return [...new Set(stdout
+      .split(/\s+/)
+      .map(value => Number(value))
+      .filter(pid => Number.isInteger(pid) && pid > 0 && pid !== process.pid)
+    )];
+  } catch (err) {
+    if (err.code === 1) return [];
+    console.warn(`[start] Could not inspect port ${port}: ${err.message}`);
+    return [];
+  }
+}
+
+async function waitForPortFree(port, timeoutMs = 2500) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const pids = await findListeningPids(port);
+    if (!pids.length) return true;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+async function killPort(port, label) {
+  const pids = await findListeningPids(port);
+  if (!pids.length) return;
+
+  console.warn(`[start] ${label} port ${port} is already in use by pid(s): ${pids.join(', ')}. Restarting cleanly.`);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (err) {
+      if (err.code !== 'ESRCH') console.warn(`[start] Failed to SIGTERM pid ${pid}: ${err.message}`);
+    }
+  }
+
+  if (await waitForPortFree(port)) return;
+
+  const stubbornPids = await findListeningPids(port);
+  if (!stubbornPids.length) return;
+  console.warn(`[start] ${label} port ${port} still busy; forcing pid(s): ${stubbornPids.join(', ')}.`);
+  for (const pid of stubbornPids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch (err) {
+      if (err.code !== 'ESRCH') console.warn(`[start] Failed to SIGKILL pid ${pid}: ${err.message}`);
+    }
+  }
+
+  if (!(await waitForPortFree(port))) {
+    throw new Error(`[start] ${label} port ${port} is still in use after cleanup.`);
+  }
+}
+
+async function killClaudioPortIfNeeded() {
+  if (!boolEnv('CLAUDIO_KILL_PORT_ON_START', true)) return;
+  await killPort(claudioPort(), 'Claudio');
 }
 
 async function isHttpReachable(url, timeoutMs = 1000) {
@@ -285,6 +370,15 @@ async function startKokoroIfNeeded() {
     return { connected: false, baseUrl, required };
   }
 
+  if (boolEnv('KOKORO_KILL_PORT_ON_START', true)) {
+    const port = kokoroPort(baseUrl);
+    const blockingPids = await findListeningPids(port);
+    if (blockingPids.length) {
+      console.warn(`[start] Kokoro TTS port ${port} is occupied but health check failed.`);
+      await killPort(port, 'Kokoro TTS');
+    }
+  }
+
   const timeoutMs = Number(process.env.KOKORO_READY_TIMEOUT_MS || DEFAULT_KOKORO_READY_TIMEOUT_MS);
   const kokoroEnv = {
     ...process.env,
@@ -325,6 +419,7 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
+  await killClaudioPortIfNeeded();
   const neteaseState = await startNeteaseIfNeeded();
   await prepareNeteaseLogin(neteaseState);
   await startKokoroIfNeeded();

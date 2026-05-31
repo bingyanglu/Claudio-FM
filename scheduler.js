@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const { buildPrompt } = require('./context');
 const { callClaude } = require('./claude');
 const { setPref } = require('./state');
+const { currentTimeContext } = require('./env-context');
 
 let broadcastFn = null;
 let triggerFn = null;  // runRadioSegment from server.js
@@ -30,11 +31,11 @@ function init(broadcast, trigger) {
   // 09:00 — morning show opens, actually plays music
   cron.schedule('0 9 * * *', async () => {
     if (!triggerFn) return;
-    const day = new Date().toLocaleDateString('zh-CN', { weekday: 'long', timeZone: 'Asia/Shanghai' });
-    console.log(`[调度] 09:00 晨间开播 (${day})…`);
+    const moment = currentTimeContext();
+    console.log(`[调度] 09:00 晨间开播 (${moment.weekday})…`);
     try {
       await triggerFn(
-        `Good morning — it's 9am on a ${new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'Asia/Shanghai' })}. Open the station. `
+        `Good morning — it's 9am on ${moment.date}. Open the station. `
         + `Pick something that eases into the day without forcing the mood. 2–3 tracks.`,
         { mode: 'music', source: 'scheduler' },
         true
@@ -47,12 +48,13 @@ function init(broadcast, trigger) {
   // Every hour — vibe check: hold direction or shift, Claude decides
   cron.schedule('0 * * * *', async () => {
     if (!triggerFn) return;
-    const hour = new Date().getHours();
+    const moment = currentTimeContext();
+    const hour = moment.hour;
     if (hour === 9) return; // morning already handled above
     console.log(`[调度] ${hour}:00 整点情绪检查…`);
     try {
       await triggerFn(
-        `It's ${hour}:00. Check the station. Based on the time and recent play history, `
+        `It's ${moment.time} on ${moment.date}. Check the station. Based on the time and recent play history, `
         + `decide whether to hold the current direction or bring in a new set. `
         + `If the vibe still fits, say something brief and keep going. `
         + `If it's time to shift, pick a fresh set that fits the new moment.`,
