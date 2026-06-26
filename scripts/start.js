@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const path = require('path');
 const { spawn } = require('child_process');
 const {
   boolEnv,
@@ -8,8 +9,8 @@ const {
   redactSensitiveText,
 } = require('../netease-session');
 
-const DEFAULT_NETEASE_COMMAND = 'npx';
-const DEFAULT_NETEASE_ARGS = ['NeteaseCloudMusicApi@latest'];
+const DEFAULT_NETEASE_COMMAND = process.execPath;
+const DEFAULT_NETEASE_ARGS = [path.join(path.dirname(require.resolve('NeteaseCloudMusicApi/package.json')), 'app.js')];
 const DEFAULT_NETEASE_READY_TIMEOUT_MS = 60000;
 
 const children = new Set();
