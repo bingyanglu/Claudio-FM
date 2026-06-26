@@ -10,7 +10,7 @@ const {
 } = require('../netease-session');
 
 const DEFAULT_NETEASE_COMMAND = process.execPath;
-const DEFAULT_NETEASE_ARGS = [path.join(__dirname, '..', 'node_modules', 'NeteaseCloudMusicApi', 'app.js')];
+const DEFAULT_NETEASE_ARGS = [path.join(path.dirname(require.resolve('NeteaseCloudMusicApi/package.json')), 'app.js')];
 const DEFAULT_NETEASE_READY_TIMEOUT_MS = 60000;
 
 const children = new Set();
