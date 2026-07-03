@@ -8,7 +8,7 @@ const { WebSocketServer } = require('ws');
 const { route } = require('./router');
 const { buildPrompt, buildProgramStartPrompt, buildColdOpenForTracksPrompt, buildMusicRefillPrompt, buildBridgePrompt } = require('./context');
 const { callClaude } = require('./claude');
-const { synthesize } = require('./tts');
+const { synthesize, getVoiceTypeList } = require('./tts');
 const { getTrack } = require('./music');
 const { addPlay, addMessage, recentPlays, getPref } = require('./state');
 const scheduler = require('./scheduler');
@@ -212,7 +212,8 @@ function normalizeSegments(result, tracks, speechOnly, failedTracks) {
   }));
 }
 
-async function synthesizeSegments(segments) {
+async function synthesizeSegments(segments, voiceType) {
+  const ttsOptions = voiceType ? { voiceType } : {};
   for (const segment of segments) {
     if (segment.type === 'silence' || !segment.text) {
       segment.status = 'silent';
@@ -220,7 +221,7 @@ async function synthesizeSegments(segments) {
     }
     try {
       console.log(`[TTS] 合成 ${segment.type} (${segment.text.length} 字): "${segment.text.slice(0, 50)}…"`);
-      const f = await synthesize(segment.text);
+      const f = await synthesize(segment.text, ttsOptions);
       segment.ttsUrl = '/api/tts/' + path.basename(f);
       segment.status = 'ready';
       console.log(`[TTS] ${segment.type} 完成 → ${path.basename(f)}`);
@@ -448,7 +449,7 @@ async function runJob(job) {
   throw new Error(`Unknown job type: ${job.type}`);
 }
 
-function enqueueBridgeJobs({ programId, sessionTitle, tracks, startIndex = 0, previousTrack = null, previousIndex = null, djLanguage = 'en' }) {
+function enqueueBridgeJobs({ programId, sessionTitle, tracks, startIndex = 0, previousTrack = null, previousIndex = null, djLanguage = 'en', voiceType }) {
   if (previousTrack && tracks.length) {
     enqueueJob({
       type: 'bridge_generation',
@@ -460,6 +461,7 @@ function enqueueBridgeJobs({ programId, sessionTitle, tracks, startIndex = 0, pr
       afterTrackIndex: previousIndex,
       beforeTrackIndex: startIndex,
       djLanguage: normalizeDjLanguage(djLanguage),
+      voiceType,
     });
   }
   for (let i = 1; i < tracks.length; i++) {
@@ -473,6 +475,7 @@ function enqueueBridgeJobs({ programId, sessionTitle, tracks, startIndex = 0, pr
       afterTrackIndex: startIndex + i - 1,
       beforeTrackIndex: startIndex + i,
       djLanguage: normalizeDjLanguage(djLanguage),
+      voiceType,
     });
   }
 }
@@ -504,7 +507,7 @@ async function runProgramStartJob(job) {
       ...coldOpenSegments,
     ],
   };
-  const segments = await synthesizeSegments(normalizeSegments(coldOpenResult, tracks, false, failedTracks));
+  const segments = await synthesizeSegments(normalizeSegments(coldOpenResult, tracks, false, failedTracks), job.voiceType);
 
   stationState.programId = programId;
   stationState.sessionTitle = result.title || '';
@@ -525,7 +528,7 @@ async function runProgramStartJob(job) {
   };
   broadcast(payload);
 
-  enqueueBridgeJobs({ programId, sessionTitle: result.title || '', tracks, startIndex: 0, djLanguage: job.djLanguage });
+  enqueueBridgeJobs({ programId, sessionTitle: result.title || '', tracks, startIndex: 0, djLanguage: job.djLanguage, voiceType: job.voiceType });
   return payload;
 }
 
@@ -557,7 +560,7 @@ async function runMusicRefillJob(job) {
     reason: result.reason,
   };
   broadcast(payload);
-  enqueueBridgeJobs({ programId, sessionTitle: stationState.sessionTitle, tracks, startIndex, previousTrack, previousIndex, djLanguage: job.djLanguage });
+  enqueueBridgeJobs({ programId, sessionTitle: stationState.sessionTitle, tracks, startIndex, previousTrack, previousIndex, djLanguage: job.djLanguage, voiceType: job.voiceType });
   return payload;
 }
 
@@ -576,7 +579,7 @@ async function runBridgeGenerationJob(job) {
     new Array(Math.max(job.beforeTrackIndex + 1, 1)).fill(null),
     false,
     []
-  ));
+  ), job.voiceType);
   segments = segments.filter(segment =>
     segment.position === 'between_tracks' &&
     segment.afterTrackIndex === job.afterTrackIndex &&
@@ -621,7 +624,7 @@ async function runRadioSegment(userInput, intent = {}, skipHistory = false) {
   const requestedTracks = speechOnly ? [] : (result.play || []);
   const { tracks, failedTracks } = await resolveRequestedTracks(requestedTracks);
 
-  const segments = await synthesizeSegments(normalizeSegments(result, tracks, speechOnly, failedTracks));
+  const segments = await synthesizeSegments(normalizeSegments(result, tracks, speechOnly, failedTracks), intent.voiceType);
   applyLegacyTrackIntrosFromSegments(tracks, segments);
   const firstPlayableSegment = segments.find(s => s.ttsUrl && s.text && s.type !== 'silence');
   const announcement = buildAnnouncement({ ...result, segments }, tracks, failedTracks, speechOnly);
@@ -668,12 +671,13 @@ async function handleClaudeRequest(userInput, res, intent = {}, skipHistory = fa
 
 // ── HTTP Routes ──────────────────────────────────────────────────────────────
 app.post('/api/chat', async (req, res) => {
-  const { message, autoRefill, djLanguage } = req.body;
+  const { message, autoRefill, djLanguage, voiceType } = req.body;
   if (!message) return res.status(400).json({ error: 'message required' });
 
   const intent = route(message);
   intent.source = autoRefill ? 'autoRefill' : 'user';
   intent.djLanguage = normalizeDjLanguage(djLanguage);
+  intent.voiceType = typeof voiceType === 'string' && voiceType.trim() ? voiceType.trim() : undefined;
 
   if (intent.action === 'next') {
     broadcast({ type: 'control', action: 'next' });
@@ -699,6 +703,7 @@ app.post('/api/chat', async (req, res) => {
       input: intent.message,
       source: autoRefill ? 'autoRefill' : 'user',
       djLanguage: intent.djLanguage,
+      voiceType: intent.voiceType,
     });
     return res.json({ queued: true, jobType: 'program_start' });
   }
@@ -716,6 +721,7 @@ app.post('/api/radio/refill', (req, res) => {
     queue = [],
     queueLength,
     djLanguage,
+    voiceType,
   } = req.body || {};
   const effectiveProgramId = programId || stationState.programId || makeProgramId();
   const effectiveQueueLength = Number.isInteger(queueLength) ? queueLength : Array.isArray(queue) ? queue.length : stationState.tracks.length;
@@ -732,6 +738,7 @@ app.post('/api/radio/refill', (req, res) => {
     queueLength: effectiveQueueLength,
     count: REFILL_TRACK_COUNT,
     djLanguage: normalizeDjLanguage(djLanguage),
+    voiceType: typeof voiceType === 'string' && voiceType.trim() ? voiceType.trim() : undefined,
   });
   res.json({ queued: accepted, jobType: 'music_refill', programId: effectiveProgramId });
 });
@@ -757,6 +764,10 @@ app.get('/api/taste', (req, res) => {
 app.get('/api/plan/today', (req, res) => {
   const plan = getPref('today_plan');
   res.json(plan || { message: '今日计划尚未生成' });
+});
+
+app.get('/api/tts/voices', (req, res) => {
+  res.json({ voices: getVoiceTypeList() });
 });
 
 app.post('/api/tts/caller', async (req, res) => {

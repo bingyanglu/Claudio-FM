@@ -1130,6 +1130,10 @@ html, body {
       <button type="button" data-lang="zh" aria-pressed="false">中文</button>
     </div>
   </div>
+  <div class="tweak-row" id="voiceTypeRow" style="display:none;">
+    <label>Voice</label>
+    <select id="voiceTypeControl"></select>
+  </div>
   <div class="tweak-row">
     <label>DJ volume <span id="lblDjVolume">100%</span></label>
     <input type="range" id="inDjVolume" min="0" max="100" value="100">
@@ -1232,6 +1236,38 @@ function setDjLanguage(value) {
 }
 
 syncDjLanguageControl();
+
+const voiceTypeRow = document.getElementById('voiceTypeRow');
+const voiceTypeControl = document.getElementById('voiceTypeControl');
+let voiceType = localStorage.getItem('claudio:voice-type') || '';
+
+async function loadVoiceTypes() {
+  try {
+    const res = await fetch('/api/tts/voices');
+    const data = await res.json();
+    const voices = Array.isArray(data.voices) ? data.voices : [];
+    if (!voices.length) return;
+    voiceTypeControl.innerHTML = '';
+    voices.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v;
+      opt.textContent = v;
+      voiceTypeControl.appendChild(opt);
+    });
+    const saved = localStorage.getItem('claudio:voice-type');
+    voiceType = voices.includes(saved) ? saved : voices[0];
+    voiceTypeControl.value = voiceType;
+    voiceTypeRow.style.display = '';
+  } catch (err) {
+    console.error('[voice-type]', err);
+  }
+}
+loadVoiceTypes();
+
+voiceTypeControl.addEventListener('change', () => {
+  voiceType = voiceTypeControl.value;
+  localStorage.setItem('claudio:voice-type', voiceType);
+});
 
 /* ── Clock ────────────────────────────────────────────────────────── */
 function updateClock() {
@@ -2065,6 +2101,7 @@ function autoRefill() {
       queue: queue.map(({ query, title, artist }) => ({ query, title, artist })),
       queueLength: queue.length,
       djLanguage,
+      voiceType,
     }),
   })
     .catch(err => {
@@ -2341,7 +2378,7 @@ async function requestChat(message, { showUserTurn = true } = {}) {
   await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, djLanguage }),
+    body: JSON.stringify({ message, djLanguage, voiceType }),
   });
 }
 

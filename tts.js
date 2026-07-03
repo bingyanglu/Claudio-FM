@@ -51,6 +51,11 @@ function getVoiceForProvider(provider, options = {}) {
   return options.voice || process.env.KOKORO_VOICE || '';
 }
 
+function getVoiceTypeList() {
+  const raw = process.env.VOLCENGINE_TTS_VOICE_TYPE_LIST || '';
+  return raw.split(',').map(s => s.trim()).filter(Boolean);
+}
+
 function buildVolcenginePayload(text, options = {}) {
   const voiceType = options.voiceType || process.env.VOLCENGINE_TTS_VOICE_TYPE;
   if (!voiceType) {
@@ -257,4 +262,4 @@ async function synthesizeKokoro(text, outPath, options = {}) {
   return outPath;
 }
 
-module.exports = { synthesize, cachePath };
+module.exports = { synthesize, cachePath, getVoiceTypeList };
