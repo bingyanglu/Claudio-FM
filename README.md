@@ -1,3 +1,5 @@
+
+
 # Claudio FM
 
 **Claudio FM is a private AI radio station.**
@@ -93,7 +95,7 @@ http://localhost:8080
 
 ## Current Version
 
-`v1.1.1` is the single-user radio version.
+`v1.0.0` is the single-user radio version.
 
 It is designed for one local listener experience: one private station, one local playback session, and one AI DJ running the show.
 
@@ -191,6 +193,6 @@ http://localhost:8080
 
 ## 当前版本
 
-`v1.1.1` 是单人电台版本。
+`v1.0.0` 是单人电台版本。
 
 它面向一个本地听众体验：一个私人电台、一个本地播放会话，以及一个在后台运营节目的 AI DJ。
